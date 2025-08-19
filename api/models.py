@@ -1,9 +1,11 @@
-from datetime import timedelta
+from datetime import timedelta, time
 from decimal import Decimal
 from django.db import models
 from django.core.exceptions import ValidationError
-from datetime import timedelta, time
-
+from django.core.mail import send_mail
+import qrcode
+from io import BytesIO
+from django.core.files.base import ContentFile
 
 # ----- small choice sets -----
 RATING_CHOICES = [
@@ -83,10 +85,6 @@ class Screening(models.Model):
         return self.start_time + timedelta(minutes=self.movie.duration_minutes)
 
     def clean(self):
-        """
-        Prevent overlapping screenings in the same hall.
-        Note: call full_clean() before save in views/serializers, or rely on higher-level checks.
-        """
         overlapping = []
         for s in Screening.objects.filter(hall=self.hall).exclude(pk=self.pk):
             s_end = s.start_time + timedelta(minutes=s.movie.duration_minutes)
@@ -117,6 +115,7 @@ class Booking(models.Model):
     booked_at = models.DateTimeField(auto_now_add=True)
     price = models.DecimalField(max_digits=8, decimal_places=2, editable=False, default=0.00)
     discount_code = models.CharField(max_length=20, blank=True, null=True)
+    qr_code = models.ImageField(upload_to="qrcodes/", blank=True, null=True)  # NEW
 
     def clean(self):
         if self.seat and Booking.objects.filter(screening=self.screening, seat=self.seat).exclude(pk=self.pk).exists():
@@ -127,28 +126,68 @@ class Booking(models.Model):
 
         # VIP surcharge
         if self.seat and self.seat.seat_type == "VIP":
-            price *= Decimal("1.5")  # 50% more for VIP
+            price *= Decimal("1.5")
 
         # Late screening surcharge (after 12 PM)
         if self.screening.start_time.time() >= time(12, 0):
             price += Decimal("100")
 
-        # Optional: hall-based pricing
+        # Hall-based pricing
         if self.seat and self.seat.hall.total_seats > 100:
-            price *= Decimal("1.1")  # 10% more for large halls
+            price *= Decimal("1.1")
 
         # Discount codes
         if self.discount_code:
             code = self.discount_code.upper()
             if code == "STUDENT10":
-                price *= Decimal("0.9")  # 10% off
+                price *= Decimal("0.9")
             elif code == "VIP20":
-                price *= Decimal("0.8")  # 20% off
+                price *= Decimal("0.8")
             elif code == "FREE":
-                price = Decimal("0")  # free booking
+                price = Decimal("0")
 
         return round(price, 2)
 
+    def generate_qr(self):
+        qr_data = (
+            f"Booking ID: {self.id}\n"
+            f"Movie: {self.screening.movie.title}\n"
+            f"Hall: {self.screening.hall.name}\n"
+            f"Seat: {self.seat}\n"
+            f"Time: {self.screening.start_time}\n"
+            f"Price: {self.price}"
+        )
+        qr_img = qrcode.make(qr_data)
+        buffer = BytesIO()
+        qr_img.save(buffer, format="PNG")
+        file_name = f"booking_{self.id}_qr.png"
+        self.qr_code.save(file_name, ContentFile(buffer.getvalue()), save=False)
+
+    def send_confirmation_email(self):
+        if self.email:
+            send_mail(
+                subject="Your Booking Confirmation",
+                message=(
+                    f"Hello {self.customer_name},\n\n"
+                    f"Your booking is confirmed:\n"
+                    f"Movie: {self.screening.movie.title}\n"
+                    f"Hall: {self.screening.hall.name}\n"
+                    f"Seat: {self.seat}\n"
+                    f"Time: {self.screening.start_time}\n"
+                    f"Price: {self.price}\n\n"
+                    f"Thank you for booking with us!"
+                ),
+                from_email="noreply@cinemabooking.com",
+                recipient_list=[self.email],
+                fail_silently=True,
+            )
+
     def save(self, *args, **kwargs):
         self.price = self.calculate_price()
-        super().save(*args, **kwargs)
+        super().save(*args, **kwargs)  # save once (to get ID)
+        self.generate_qr()
+        super().save(update_fields=["qr_code"])  # save QR
+        self.send_confirmation_email()
+
+    def __str__(self):
+        return f"{self.customer_name} - {self.screening} - {self.seat}"
