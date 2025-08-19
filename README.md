@@ -1,4 +1,4 @@
-# 🎬 Cinema Booking API (GROUP9)
+# 🎬 Cinema Booking API (GROUP5)
 
 A Django + Django REST Framework (DRF) API for managing movies, halls, seats, screenings, and bookings.  
 Includes authentication, pricing logic, booking validation, and **email confirmations with QR codes** for a real-world cinema experience.
